@@ -1,0 +1,1105 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="robots" content="noindex" />
+    <title>TikTok動画メーカー for 楽天市場</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.3.1/umd/react.production.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.3.1/umd/react-dom.production.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script>
+"use strict";
+const { useState, useRef, useEffect, useCallback } = React;
+// ============================================================
+// TikTok動画メーカー for Yahoo!ショッピング商品ページ
+// 抽出スクリプトのJSONを読込 → Claudeがページ内容に忠実な台本を生成
+// → Canvas録画で 9:16 動画(MP4/WebM)を書き出し
+// ============================================================
+const W = 1080, H = 1920; // 書き出し解像度
+const FPS = 30;
+const EFFECTS = ["zoomIn", "zoomOut", "panLeft", "panRight", "punchIn", "shake", "flash", "static"];
+const EFFECT_LABEL = { zoomIn: "ズームイン", zoomOut: "ズームアウト", panLeft: "パン←", panRight: "パン→", punchIn: "パンチイン", shake: "シェイク", flash: "フラッシュ", static: "静止" };
+const ROLES = ["hook", "body", "price", "cta"];
+const ROLE_LABEL = { hook: "つかみ", body: "本文", price: "価格", cta: "締め" };
+const FONT = '"Hiragino Sans","Yu Gothic UI","Noto Sans JP",sans-serif';
+// ---------- 描画エンジン(プレビューと書き出しで共用) ----------
+function coverDraw(ctx, img, w, h, scale, dx, dy) {
+    const ir = img.naturalWidth / img.naturalHeight;
+    const cr = w / h;
+    let dw, dh;
+    if (ir > cr) {
+        dh = h * scale;
+        dw = dh * ir;
+    }
+    else {
+        dw = w * scale;
+        dh = dw / ir;
+    }
+    ctx.drawImage(img, (w - dw) / 2 + dx * w, (h - dh) / 2 + dy * h, dw, dh);
+}
+function drawScene(ctx, w, h, scene, img, p, product) {
+    const s = w / W; // 1080基準スケール
+    ctx.fillStyle = "#000";
+    ctx.fillRect(0, 0, w, h);
+    // 画像 + エフェクト
+    let flashAlpha = 0;
+    if (img && img.complete && img.naturalWidth > 0) {
+        let scale = 1.08, dx = 0, dy = 0;
+        const e = scene.effect;
+        if (e === "zoomIn")
+            scale = 1.02 + 0.14 * p;
+        else if (e === "zoomOut")
+            scale = 1.16 - 0.14 * p;
+        else if (e === "panLeft") {
+            scale = 1.14;
+            dx = 0.03 - 0.06 * p;
+        }
+        else if (e === "panRight") {
+            scale = 1.14;
+            dx = -0.03 + 0.06 * p;
+        }
+        else if (e === "punchIn")
+            scale = 1.02 + 0.17 * Math.min(1, p / 0.12); // 冒頭で一気に寄る
+        else if (e === "shake") {
+            scale = 1.12;
+            dx = 0.008 * Math.sin(p * 85);
+            dy = 0.006 * Math.sin(p * 63);
+        }
+        else if (e === "flash") {
+            scale = 1.05 + 0.05 * p;
+            flashAlpha = Math.max(0, 1 - p * 6);
+        }
+        else
+            scale = 1.02;
+        coverDraw(ctx, img, w, h, scale, dx, dy);
+        if (flashAlpha > 0) {
+            ctx.fillStyle = `rgba(255,255,255,${flashAlpha})`;
+            ctx.fillRect(0, 0, w, h);
+        }
+    }
+    else {
+        ctx.fillStyle = "#1a1a1a";
+        ctx.fillRect(0, 0, w, h);
+        ctx.fillStyle = "#666";
+        ctx.font = `${40 * s}px ${FONT}`;
+        ctx.textAlign = "center";
+        ctx.fillText("画像なし", w / 2, h / 2);
+    }
+    // 下部グラデーション(テロップ可読性)
+    const g = ctx.createLinearGradient(0, h * 0.55, 0, h);
+    g.addColorStop(0, "rgba(0,0,0,0)");
+    g.addColorStop(1, "rgba(0,0,0,0.72)");
+    ctx.fillStyle = g;
+    ctx.fillRect(0, h * 0.55, w, h * 0.45);
+    ctx.textAlign = "center";
+    const strokeText = (text, x, y, size, weight = 900, fill = "#fff") => {
+        ctx.font = `${weight} ${size}px ${FONT}`;
+        ctx.lineJoin = "round";
+        ctx.strokeStyle = "rgba(0,0,0,0.85)";
+        ctx.lineWidth = size * 0.16;
+        ctx.strokeText(text, x, y);
+        ctx.fillStyle = fill;
+        ctx.fillText(text, x, y);
+    };
+    const lines = String(scene.text || "").split("\n").filter(Boolean);
+    if (scene.role === "hook") {
+        // 中央大テロップ(フェード+ポップイン)
+        const pop = Math.min(1, p * 6);
+        const size = (86 + 8 * pop) * s;
+        ctx.save();
+        ctx.globalAlpha = Math.min(1, p * 8);
+        lines.forEach((ln, i) => {
+            strokeText(ln, w / 2, h * 0.42 + i * size * 1.22, size, 900, i === 0 ? "#FFE14D" : "#fff");
+        });
+        ctx.restore();
+    }
+    else if (scene.role === "price") {
+        // 価格バッジ
+        const priceNum = Number((product === null || product === void 0 ? void 0 : product.price) || 0);
+        const priceStr = priceNum ? `¥${priceNum.toLocaleString()}` : (scene.text || "");
+        const bw = w * 0.72, bh = 210 * s, bx = (w - bw) / 2, by = h * 0.40;
+        ctx.save();
+        ctx.globalAlpha = 0.94;
+        ctx.fillStyle = "#E8112D";
+        const r = 28 * s;
+        ctx.beginPath();
+        ctx.roundRect(bx, by, bw, bh, r);
+        ctx.fill();
+        ctx.restore();
+        strokeText(priceStr, w / 2, by + bh * 0.68, 120 * s, 900, "#fff");
+        if (scene.sub)
+            strokeText(scene.sub, w / 2, by - 40 * s, 52 * s, 800, "#FFE14D");
+        // 本文テロップも下に
+        lines.forEach((ln, i) => strokeText(ln, w / 2, h * 0.70 + i * 78 * s, 60 * s));
+    }
+    else {
+        // 通常テロップ: 下部(TikTokのキャプション帯を避け、h*0.62〜0.76に配置)
+        const size = 64 * s;
+        lines.forEach((ln, i) => strokeText(ln, w / 2, h * 0.66 + i * size * 1.25, size));
+        if (scene.sub)
+            strokeText(scene.sub, w / 2, h * 0.66 - size * 1.15, 44 * s, 800, "#8FE3FF");
+        if (scene.role === "cta") {
+            // ストア名タグ
+            const tag = (product === null || product === void 0 ? void 0 : product.storeName) ? `▶ ${product.storeName}` : "▶ 商品ページはプロフィールから";
+            strokeText(tag, w / 2, h * 0.78, 44 * s, 800, "#FFE14D");
+        }
+    }
+}
+function drawGuides(ctx, w, h) {
+    // TikTok UIセーフゾーン(プレビュー専用)
+    ctx.save();
+    ctx.fillStyle = "rgba(255,93,115,0.16)";
+    ctx.fillRect(w * 0.86, h * 0.30, w * 0.14, h * 0.50); // 右アイコン列
+    ctx.fillRect(0, h * 0.82, w, h * 0.18); // 下部キャプション帯
+    ctx.strokeStyle = "rgba(255,93,115,0.5)";
+    ctx.setLineDash([6, 6]);
+    ctx.strokeRect(w * 0.86, h * 0.30, w * 0.14, h * 0.50);
+    ctx.strokeRect(0, h * 0.82, w, h * 0.18);
+    ctx.restore();
+}
+// ---------- 台本生成プロンプト ----------
+function buildPrompt(product, imgCount, refStyle, autoTrend) {
+    const data = {
+        タイトル: product.title,
+        価格: product.price,
+        ストア名: product.storeName,
+        商品説明: (product.description || "").slice(0, 3500),
+        スペック: (product.specs || []).slice(0, 20),
+        画像枚数: imgCount,
+    };
+    const trendBlock = autoTrend
+        ? `【事前調査(必須)】
+まずweb検索で「車用品 TikTok バズる 動画 構成」「カー用品 ショート動画 フック テンポ」等を調べ、いま伸びている車用品ショート動画の型(冒頭フックの作り方、カット割りのテンポ、テロップの使い方)を把握してから台本を作ること。調査結果の分析は出力せず、最終出力はJSONのみ。`
+        : "";
+    const refBlock = (refStyle === null || refStyle === void 0 ? void 0 : refStyle.trim())
+        ? `【参考スタイル(ユーザーがTikTokで見つけた同ジャンル/同一商品の投稿)】
+${refStyle.trim().slice(0, 1500)}
+上記から模倣してよいのは「構成・テンポ・カット割り・テロップの使い方」という型のみ。文言・映像・音声そのもののコピーは絶対禁止。実写の動き(手で装着する等)は再現できないため、punchIn(勢いよく寄る)・shake(振動)・flash(白フラッシュ)・短い秒数のクイックカットで同等のテンポ感に翻訳すること。`
+        : "";
+    return `あなたはECの縦型ショート動画の構成作家です。以下のYahoo!ショッピング/楽天市場の商品データだけを根拠に、TikTok用動画(15〜24秒)のシーン構成を作ってください。
+${trendBlock}
+${refBlock}
+
+【最重要ルール(逸脱厳禁)】
+- 商品データに書かれていない用途・適合車種・素材・機能・効果を絶対に追加しない(推測・創作禁止)
+- 別の商品や別の用途と誤解される表現を使わない
+- 「最安」「No.1」「業界初」など、データに記載のない優位性表現を使わない
+- 価格・数値・型番はデータの記載のまま使う
+- 商品説明に適合情報(車種・年式など)があれば、必ずどこかのシーンで正確に伝える
+
+【出力形式】
+JSONのみを出力。前置き・コードブロック記法・説明は一切不要。
+{
+  "scenes": [
+    { "role": "hook",  "img": 0, "text": "1行13文字以内\\n最大2行", "sub": "", "sec": 2.0, "effect": "zoomIn" },
+    { "role": "body",  "img": 1, "text": "...", "sub": "補足15文字以内(任意)", "sec": 2.8, "effect": "panLeft" },
+    { "role": "price", "img": 2, "text": "...", "sub": "例: 送料無料(記載がある場合のみ)", "sec": 2.5, "effect": "static" },
+    { "role": "cta",   "img": 0, "text": "...", "sec": 2.2, "effect": "zoomOut" }
+  ]
+}
+- scenes は5〜8個。roleは hook(最初の1つ), body(複数), price(価格記載があれば1つ), cta(最後の1つ)
+- img は 0〜${Math.max(0, imgCount - 1)} の整数(画像インデックス)。同じ画像の連続使用は避ける
+- effect は zoomIn / zoomOut / panLeft / panRight / punchIn / shake / flash / static のいずれか
+- sec は 0.8〜4.0。テンポ重視なら短いカットを刻んでよい
+- text は日本語。1行13文字以内、\\n区切りで最大2行。口語で短く、商品説明の言葉を活かす
+
+【商品データ】
+${JSON.stringify(data, null, 1)}`;
+}
+// ---------- 音声エンジン(Web Audio合成・著作権フリー) ----------
+function noiseBuffer(ac, sec = 0.5) {
+    const buf = ac.createBuffer(1, ac.sampleRate * sec, ac.sampleRate);
+    const d = buf.getChannelData(0);
+    for (let i = 0; i < d.length; i++)
+        d[i] = Math.random() * 2 - 1;
+    return buf;
+}
+function scheduleSE(ac, out, t, kind) {
+    const g = ac.createGain();
+    g.connect(out);
+    if (kind === "impact") {
+        // フック用: 低音ドン + ノイズバースト
+        const o = ac.createOscillator();
+        o.type = "sine";
+        o.frequency.setValueAtTime(130, t);
+        o.frequency.exponentialRampToValueAtTime(42, t + 0.3);
+        g.gain.setValueAtTime(0.85, t);
+        g.gain.exponentialRampToValueAtTime(0.001, t + 0.4);
+        o.connect(g);
+        o.start(t);
+        o.stop(t + 0.45);
+        const n = ac.createBufferSource();
+        n.buffer = noiseBuffer(ac, 0.1);
+        const ng = ac.createGain();
+        ng.gain.setValueAtTime(0.3, t);
+        ng.gain.exponentialRampToValueAtTime(0.001, t + 0.09);
+        n.connect(ng);
+        ng.connect(out);
+        n.start(t);
+    }
+    else if (kind === "whoosh") {
+        // 場面転換: ノイズのバンドパススイープ
+        const n = ac.createBufferSource();
+        n.buffer = noiseBuffer(ac, 0.3);
+        const f = ac.createBiquadFilter();
+        f.type = "bandpass";
+        f.Q.value = 1.2;
+        f.frequency.setValueAtTime(400, t);
+        f.frequency.exponentialRampToValueAtTime(3600, t + 0.2);
+        g.gain.setValueAtTime(0.0001, t);
+        g.gain.exponentialRampToValueAtTime(0.32, t + 0.06);
+        g.gain.exponentialRampToValueAtTime(0.001, t + 0.24);
+        n.connect(f);
+        f.connect(g);
+        n.start(t);
+    }
+    else if (kind === "ding") {
+        // 価格用: チャリン(2打)
+        [0, 0.09].forEach((dt, i) => {
+            [1244.5, 1864.7].forEach((fq) => {
+                const o = ac.createOscillator();
+                o.type = "triangle";
+                o.frequency.value = fq * (i ? 1.002 : 1);
+                const og = ac.createGain();
+                og.gain.setValueAtTime(0.22, t + dt);
+                og.gain.exponentialRampToValueAtTime(0.001, t + dt + 0.5);
+                o.connect(og);
+                og.connect(out);
+                o.start(t + dt);
+                o.stop(t + dt + 0.55);
+            });
+        });
+    }
+    else if (kind === "pop") {
+        const o = ac.createOscillator();
+        o.type = "triangle";
+        o.frequency.setValueAtTime(520, t);
+        o.frequency.exponentialRampToValueAtTime(920, t + 0.1);
+        g.gain.setValueAtTime(0.4, t);
+        g.gain.exponentialRampToValueAtTime(0.001, t + 0.14);
+        o.connect(g);
+        o.start(t);
+        o.stop(t + 0.16);
+    }
+}
+function scheduleBeat(ac, out, t0, totalSec, bpm = 104) {
+    const beat = 60 / bpm;
+    for (let t = t0; t < t0 + totalSec - 0.3; t += beat) {
+        // キック
+        const o = ac.createOscillator();
+        o.type = "sine";
+        o.frequency.setValueAtTime(150, t);
+        o.frequency.exponentialRampToValueAtTime(48, t + 0.1);
+        const g = ac.createGain();
+        g.gain.setValueAtTime(0.4, t);
+        g.gain.exponentialRampToValueAtTime(0.001, t + 0.12);
+        o.connect(g);
+        g.connect(out);
+        o.start(t);
+        o.stop(t + 0.14);
+        // ハイハット(8分)
+        [0, beat / 2].forEach((dt) => {
+            const n = ac.createBufferSource();
+            n.buffer = noiseBuffer(ac, 0.05);
+            const f = ac.createBiquadFilter();
+            f.type = "highpass";
+            f.frequency.value = 6500;
+            const hg = ac.createGain();
+            hg.gain.setValueAtTime(0.09, t + dt);
+            hg.gain.exponentialRampToValueAtTime(0.001, t + dt + 0.04);
+            n.connect(f);
+            f.connect(hg);
+            hg.connect(out);
+            n.start(t + dt);
+        });
+    }
+}
+// ---------- CSVパーサ(dl-normal-item / Shift_JIS対応) ----------
+function parseCsv(text) {
+    const rows = [];
+    let row = [], field = "", q = false;
+    for (let i = 0; i < text.length; i++) {
+        const c = text[i];
+        if (q) {
+            if (c === '"') {
+                if (text[i + 1] === '"') {
+                    field += '"';
+                    i++;
+                }
+                else
+                    q = false;
+            }
+            else
+                field += c;
+        }
+        else if (c === '"')
+            q = true;
+        else if (c === ",") {
+            row.push(field);
+            field = "";
+        }
+        else if (c === "\n" || c === "\r") {
+            if (c === "\r" && text[i + 1] === "\n")
+                i++;
+            row.push(field);
+            field = "";
+            if (row.length > 1 || row[0] !== "")
+                rows.push(row);
+            row = [];
+        }
+        else
+            field += c;
+    }
+    if (field !== "" || row.length) {
+        row.push(field);
+        rows.push(row);
+    }
+    return rows;
+}
+// ---------- 構成テンプレート(AIなし台本生成用) ----------
+// 車用品ショート動画で実績のある「型」。トレンドに合わせて月1回見直す想定。
+const TEMPLATES = {
+    quick: { label: "クイックカット型(テンポ重視)", hookSec: 1.2, bodySec: 1.1, bodies: 4, effects: ["punchIn", "shake", "flash", "punchIn"] },
+    balance: { label: "バランス型(標準)", hookSec: 1.8, bodySec: 2.6, bodies: 3, effects: ["zoomIn", "panLeft", "flash"] },
+    steady: { label: "じっくり紹介型", hookSec: 2.2, bodySec: 3.0, bodies: 3, effects: ["zoomIn", "panLeft", "panRight"] },
+    priceFirst: { label: "価格ドン型(価格を先出し)", hookSec: 1.5, bodySec: 2.2, bodies: 3, effects: ["zoomIn", "flash", "panLeft"] },
+};
+// テンプレートから台本を組み立てる純関数(文言はすべて商品データ由来)
+function draftScenes(product, imageCount, tplKey) {
+    const tpl = TEMPLATES[tplKey] || TEMPLATES.balance;
+    const wrap = (t) => {
+        t = t.slice(0, 26);
+        return t.length > 13 ? t.slice(0, 13) + "\n" + t.slice(13) : t;
+    };
+    const sentences = (product.description || "")
+        .split(/[。\n!！]/)
+        .map((t) => t.trim())
+        .filter((t) => t.length >= 6 && t.length <= 40)
+        .slice(0, tpl.bodies);
+    const lastImg = Math.max(0, imageCount - 1);
+    const priceScene = (img) => ({
+        role: "price", img: Math.min(img, lastImg), text: "",
+        sub: (product.specs || []).find((s) => s.includes("送料")) ? "送料込み" : "",
+        sec: 2.2, effect: "static",
+    });
+    const list = [];
+    list.push({ role: "hook", img: 0, text: wrap((product.title || "").slice(0, 24)), sub: "", sec: tpl.hookSec, effect: "punchIn" });
+    if (tplKey === "priceFirst" && product.price)
+        list.push(priceScene(1));
+    sentences.forEach((t, i) => list.push({ role: "body", img: Math.min(i + 1, lastImg), text: wrap(t), sub: "", sec: tpl.bodySec, effect: tpl.effects[i % tpl.effects.length] }));
+    if (tplKey !== "priceFirst" && product.price)
+        list.push(priceScene(sentences.length + 1));
+    list.push({ role: "cta", img: 0, text: "詳細は\nプロフィールから", sub: "", sec: 2.0, effect: "zoomOut" });
+    return list;
+}
+function stripHtml(html) {
+    if (!html)
+        return "";
+    const withBreaks = String(html).replace(/<br\s*\/?>/gi, "\n").replace(/<\/(p|div|li|tr)>/gi, "\n");
+    const doc = new DOMParser().parseFromString(withBreaks, "text/html");
+    return (doc.body.textContent || "").replace(/[ \t]+/g, " ").replace(/\n{3,}/g, "\n\n").trim();
+}
+// 楽天商品URL → itemCode (shopCode:itemManageNumber)
+function parseItemCode(input) {
+    const t = input.trim();
+    if (/^[\w-]+:[\w-]+$/.test(t))
+        return t; // itemCode直接入力
+    const m = t.match(/item\.rakuten\.co\.jp\/([\w-]+)\/([\w-]+)/);
+    return m ? `${m[1]}:${m[2]}` : null;
+}
+// 画像URLを原寸に(?_ex=128x128 等を除去)
+const fullSizeUrl = (u) => String(u).replace(/\?_ex=\d+x\d+.*$/, "");
+// ---------- メインコンポーネント ----------
+function RakutenTikTokMaker() {
+    var _a;
+    const [product, setProduct] = useState(null);
+    const [images, setImages] = useState([]); // {src, el(Image), ok, exportable}
+    const [scenes, setScenes] = useState([]);
+    const [status, setStatus] = useState("");
+    const [playing, setPlaying] = useState(false);
+    const [recording, setRecording] = useState(false);
+    const [progress, setProgress] = useState(0);
+    const [guides, setGuides] = useState(true);
+    const [exportInfo, setExportInfo] = useState(null); // {url, ext, size}
+    const [activeScene, setActiveScene] = useState(0);
+    // 接続設定(Netlifyの自サイトURLに合わせて変更)
+    const [apiBase, setApiBase] = useState("/api/rakuten-item");
+    const [imgProxy, setImgProxy] = useState("https://wsrv.nl/?url=");
+    const [itemUrl, setItemUrl] = useState("");
+    const [fetching, setFetching] = useState(false);
+    // 参考スタイル(方式C: 手動入力優先、未入力なら自動トレンド調査)
+    const [refStyle, setRefStyle] = useState("");
+    const [autoTrend, setAutoTrend] = useState(true);
+    // 音声設定
+    const [seOn, setSeOn] = useState(true);
+    const [beatOn, setBeatOn] = useState(true);
+    const [bgmName, setBgmName] = useState("");
+    const bgmBufRef = useRef(null);
+    const audioCtxRef = useRef(null);
+    const getAudioCtx = () => {
+        if (!audioCtxRef.current || audioCtxRef.current.state === "closed") {
+            audioCtxRef.current = new (window.AudioContext || window.webkitAudioContext)();
+        }
+        return audioCtxRef.current;
+    };
+    const handleBgm = async (file) => {
+        try {
+            const buf = await file.arrayBuffer();
+            bgmBufRef.current = await getAudioCtx().decodeAudioData(buf);
+            setBgmName(file.name);
+            setStatus(`BGM「${file.name}」を読み込みました(商用利用可能な音源であることを確認してください)。`);
+        }
+        catch (e) {
+            setStatus("BGMの読み込みに失敗しました: " + e.message);
+        }
+    };
+    const previewRef = useRef(null);
+    const rafRef = useRef(0);
+    const playStartRef = useRef(0);
+    const totalSec = scenes.reduce((a, s) => a + (Number(s.sec) || 0), 0);
+    // ---- 画像ロード ----
+    // ① crossOrigin=anonymous で直接ロード(成功すればCORS許可あり=書き出し可)
+    // ② 失敗時は画像プロキシでbase64取得
+    // ③ それも失敗ならプレビュー専用(書き出し不可)としてロード
+    const directLoad = (src, useCors) => new Promise((resolve) => {
+        const el = new Image();
+        if (useCors && !src.startsWith("data:"))
+            el.crossOrigin = "anonymous";
+        el.onload = () => resolve(el);
+        el.onerror = () => resolve(null);
+        el.src = src;
+    });
+    const loadImage = async (src) => {
+        if (src.startsWith("data:")) {
+            const el = await directLoad(src, false);
+            return el ? { src, el, ok: true, exportable: true } : { src, el: null, ok: false, exportable: false };
+        }
+        let el = await directLoad(src, true);
+        if (el)
+            return { src, el, ok: true, exportable: true };
+        // プロキシ経由でbase64化
+        if (imgProxy) {
+            try {
+                if (/wsrv\.nl|weserv\.nl/.test(imgProxy)) {
+                    const base = imgProxy.includes("?") ? imgProxy : imgProxy + "?url=";
+                    const purl = base + encodeURIComponent(src);
+                    const el2 = await directLoad(purl, true);
+                    if (el2)
+                        return { src: purl, el: el2, ok: true, exportable: true };
+                }
+                else {
+                    const res = await fetch(`${imgProxy}?url=${encodeURIComponent(src)}`);
+                    const j = await res.json();
+                    if (j.dataUrl) {
+                        const el2 = await directLoad(j.dataUrl, false);
+                        if (el2)
+                            return { src: j.dataUrl, el: el2, ok: true, exportable: true };
+                    }
+                }
+            }
+            catch (e) { }
+        }
+        el = await directLoad(src, false);
+        return el ? { src, el, ok: true, exportable: false } : { src, el: null, ok: false, exportable: false };
+    };
+    // ---- 楽天APIから商品取得 ----
+    const handleFetch = async () => {
+        var _a, _b;
+        const itemCode = parseItemCode(itemUrl);
+        if (!itemCode) {
+            setStatus("URLを認識できません。https://item.rakuten.co.jp/店舗/商品管理番号/ の形式、または 店舗:商品管理番号 を入力してください。");
+            return;
+        }
+        setFetching(true);
+        setScenes([]);
+        setExportInfo(null);
+        setStatus("楽天APIから商品情報を取得中…");
+        try {
+            let res;
+            if (/^\d{10,}$/.test(apiBase.trim())) {
+                const api = new URL("https://app.rakuten.co.jp/services/api/IchibaItem/Search/20220601");
+                api.searchParams.set("applicationId", apiBase.trim());
+                api.searchParams.set("itemCode", itemCode);
+                api.searchParams.set("formatVersion", "2");
+                res = await fetch(api);
+            }
+            else {
+                res = await fetch(`${apiBase}?itemCode=${encodeURIComponent(itemCode)}`);
+            }
+            if (!res.ok)
+                throw new Error(`API ${res.status}`);
+            const j = await res.json();
+            const raw = (_a = j.Items) === null || _a === void 0 ? void 0 : _a[0];
+            const item = (raw === null || raw === void 0 ? void 0 : raw.Item) || raw || j.item || j;
+            if (!(item === null || item === void 0 ? void 0 : item.itemName))
+                throw new Error("商品が見つかりません(itemCodeを確認)");
+            const caption = stripHtml(item.itemCaption);
+            const catchcopy = stripHtml(item.catchcopy);
+            const prod = {
+                source: "rakuten-ichiba",
+                pageUrl: item.itemUrl || itemUrl,
+                storeName: item.shopName || "",
+                title: item.itemName || "",
+                price: String((_b = item.itemPrice) !== null && _b !== void 0 ? _b : ""),
+                description: [catchcopy, caption].filter(Boolean).join("\n\n").slice(0, 6000),
+                specs: [
+                    item.postageFlag === 0 ? "送料: 送料込み/無料" : "",
+                    item.pointRate > 1 ? `ポイント${item.pointRate}倍` : "",
+                ].filter(Boolean),
+            };
+            setProduct(prod);
+            setStatus("画像を読み込み中…");
+            const urls = (item.mediumImageUrls || [])
+                .map((im) => fullSizeUrl(typeof im === "string" ? im : im.imageUrl))
+                .filter(Boolean);
+            const loaded = [];
+            for (const u of [...new Set(urls)].slice(0, 10))
+                loaded.push(await loadImage(u));
+            const good = loaded.filter((l) => l.ok);
+            setImages(good);
+            const nonExp = good.filter((l) => !l.exportable).length;
+            setStatus(`取得完了: ${prod.title.slice(0, 30)}… / 画像${good.length}枚` +
+                (nonExp ? `(${nonExp}枚は書き出し不可。画像プロキシ設定を確認するか手動追加を)` : ""));
+        }
+        catch (e) {
+            setStatus("取得に失敗しました: " + e.message);
+        }
+        setFetching(false);
+    };
+    // ---- CSV(dl-normal-item)から商品選択 ----
+    const [csvData, setCsvData] = useState(null); // {cols, rows}
+    const [csvFilter, setCsvFilter] = useState("");
+    const [shopCode, setShopCode] = useState(() => { try { return localStorage.getItem("ttm_shop") || ""; } catch (e) { return ""; } });
+    useEffect(() => { try { localStorage.setItem("ttm_shop", shopCode.trim()); } catch (e) { } }, [shopCode]);
+    const handleCsv = async (file) => {
+        try {
+            const buf = await file.arrayBuffer();
+            let text = new TextDecoder("shift_jis").decode(buf);
+            if (text.includes("\uFFFD"))
+                text = new TextDecoder("utf-8").decode(buf); // 文字化け時はUTF-8で再試行
+            const rows = parseCsv(text);
+            if (rows.length < 2)
+                throw new Error("データ行がありません");
+            setCsvData({ cols: rows[0], rows: rows.slice(1) });
+            setStatus(`CSVを読み込みました(${rows.length - 1}行)。検索欄で絞り込んで商品を選択してください。楽天APIは使いません。`);
+        }
+        catch (e) {
+            setStatus("CSVの読み込みに失敗しました: " + e.message);
+        }
+    };
+    const buildFromCsvRow = async (rowIdx) => {
+        const { cols, rows } = csvData;
+        const row = rows[rowIdx];
+        const get = (name) => {
+            const i = cols.findIndex((c) => c.includes(name));
+            return i >= 0 ? (row[i] || "") : "";
+        };
+        const title = get("商品名");
+        if (!title) {
+            setStatus("商品名が空の行です。");
+            return null;
+        }
+        const desc = [get("キャッチコピー"), stripHtml(get("PC用商品説明文")), stripHtml(get("スマートフォン用商品説明文")), stripHtml(get("PC用販売説明文"))]
+            .filter(Boolean).join("\n\n");
+        const prod = {
+            source: "rakuten-csv",
+            pageUrl: "",
+            storeName: "",
+            title,
+            price: String(get("販売価格") || get("表示価格") || "").replace(/[^\d]/g, ""),
+            description: desc.slice(0, 6000),
+            specs: [],
+        };
+        setProduct(prod);
+        setScenes([]);
+        setExportInfo(null);
+        setStatus("画像を読み込み中…");
+        // 商品画像パス1〜20 / 商品画像URL 列を収集
+        const rawPaths = [];
+        cols.forEach((c, i) => {
+            if (/商品画像(パス|URL)/.test(c) && row[i])
+                rawPaths.push(row[i].trim());
+        });
+        const shop = shopCode.trim().replace(/^\/+|\/+$/g, "");
+        const candsOf = (v) => {
+            if (/^https?:/.test(v))
+                return [v];
+            const p = v.startsWith("/") ? v : "/" + v;
+            const list = [];
+            if (shop) {
+                list.push(`https://image.rakuten.co.jp/${shop}${p}`);
+                list.push(`https://thumbnail.image.rakuten.co.jp/@0_mall/${shop}${p}`);
+            }
+            list.push("https://image.rakuten.co.jp" + p);
+            return list;
+        };
+        const loaded = [];
+        for (const v of [...new Set(rawPaths)].slice(0, 10)) {
+            let got = null;
+            for (const cand of candsOf(v)) {
+                const r = await loadImage(cand);
+                if (r.ok) {
+                    got = r;
+                    break;
+                }
+            }
+            loaded.push(got || { src: v, el: null, ok: false, exportable: false });
+        }
+        const good = loaded.filter((l) => l.ok);
+        setImages(good);
+        const nonExp = good.filter((l) => !l.exportable).length;
+        setStatus(`選択完了: ${title.slice(0, 30)}… / 画像${good.length}枚` +
+            (nonExp ? `(${nonExp}枚は書き出し不可。画像プロキシ設定を確認するか手動追加を)` : "") +
+            (good.length === 0 ? " 画像が読めない場合は「画像を追加」から手動で入れてください。" : ""));
+        return { prod, good };
+    };
+    const selectCsvRow = (rowIdx) => buildFromCsvRow(rowIdx);
+    // ---- 一括生成: 管理番号 → 商品特定 → テンプレ台本 → 動画書き出し まで自動 ----
+    const [manageNo, setManageNo] = useState("");
+    const [autoRunning, setAutoRunning] = useState(false);
+    const autoRun = async () => {
+        if (!csvData) {
+            setStatus("先にdl-normal-item CSVを読み込んでください。");
+            return;
+        }
+        const no = manageNo.trim();
+        if (!no)
+            return;
+        setAutoRunning(true);
+        try {
+            const colIdx = csvData.cols.findIndex((c) => c.includes("商品管理番号"));
+            if (colIdx < 0)
+                throw new Error("CSVに商品管理番号の列がありません");
+            const rowIdx = csvData.rows.findIndex((r) => (r[colIdx] || "").trim() === no);
+            if (rowIdx < 0)
+                throw new Error(`管理番号「${no}」がCSVに見つかりません`);
+            const built = await buildFromCsvRow(rowIdx);
+            if (!built)
+                throw new Error("商品データの構築に失敗しました");
+            const { prod, good } = built;
+            if (!good.length)
+                throw new Error("画像が1枚も読めませんでした。上の「店舗URL」欄に楽天の店舗コード(item.rakuten.co.jp/◯◯◯/ の部分)を入力して再実行してください");
+            const exportable = good.filter((g) => g.exportable);
+            if (!exportable.length)
+                throw new Error("書き出し可能な画像がありません(「画像を追加」から手動で入れてから通常手順で)");
+            const scenesList = draftScenes(prod, good.length, tplSel);
+            setScenes(scenesList);
+            setActiveScene(0);
+            setStatus(`台本を自動生成(${TEMPLATES[tplSel].label})。続けて動画を書き出します…`);
+            await exportVideo(scenesList, good, prod);
+        }
+        catch (e) {
+            setStatus("一括生成を中断しました: " + e.message);
+        }
+        setAutoRunning(false);
+    };
+    const handleAddImages = async (files) => {
+        const readers = [...files].map((f) => new Promise((res) => {
+            const r = new FileReader();
+            r.onload = () => res(r.result);
+            r.readAsDataURL(f);
+        }));
+        const dataUrls = await Promise.all(readers);
+        const loaded = await Promise.all(dataUrls.map(loadImage));
+        setImages((prev) => [...prev, ...loaded.filter((l) => l.ok)]);
+    };
+    const removeImage = (idx) => {
+        setImages((prev) => prev.filter((_, i) => i !== idx));
+        setScenes((prev) => prev.map((s) => ({ ...s, img: s.img >= idx && s.img > 0 ? s.img - 1 : s.img })));
+    };
+    // ---- 台本生成(従量課金ゼロ運用) ----
+    // A: プロンプトをコピー → claude.ai(定額プラン)に貼る → 返答JSONを取り込む
+    // B: AIを使わない簡易自動生成(商品説明から機械的に構成)
+    const [aiReply, setAiReply] = useState("");
+    const parseScenes = (rawText) => {
+        const jsonMatch = String(rawText).replace(/```json|```/g, "").match(/\{[\s\S]*\}/);
+        if (!jsonMatch)
+            throw new Error("JSONが見つかりません");
+        const parsed = JSON.parse(jsonMatch[0]);
+        const list = (parsed.scenes || []).map((s) => ({
+            role: ROLES.includes(s.role) ? s.role : "body",
+            img: Math.min(Math.max(0, Number(s.img) || 0), Math.max(0, images.length - 1)),
+            text: String(s.text || "").slice(0, 60),
+            sub: String(s.sub || "").slice(0, 20),
+            sec: Math.min(4, Math.max(0.8, Number(s.sec) || 2.5)),
+            effect: EFFECTS.includes(s.effect) ? s.effect : "zoomIn",
+        }));
+        if (!list.length)
+            throw new Error("シーンが空です");
+        return list;
+    };
+    const copyPrompt = async () => {
+        if (!product)
+            return;
+        const prompt = buildPrompt(product, images.length, refStyle, autoTrend);
+        try {
+            await navigator.clipboard.writeText(prompt);
+            setStatus("プロンプトをコピーしました。claude.ai の新規チャットに貼り付け、返ってきたJSONを下の欄に貼って「取り込む」を押してください。");
+        }
+        catch {
+            setStatus("クリップボードへのコピーに失敗しました。");
+        }
+    };
+    const importReply = () => {
+        try {
+            const list = parseScenes(aiReply);
+            setScenes(list);
+            setActiveScene(0);
+            setAiReply("");
+            setStatus(`台本を取り込みました(${list.length}シーン / 約${list.reduce((a, s) => a + s.sec, 0).toFixed(1)}秒)。内容が商品ページと一致しているか必ず確認してください。`);
+        }
+        catch (e) {
+            setStatus("取り込みに失敗しました: " + e.message);
+        }
+    };
+    const [tplSel, setTplSel] = useState("balance");
+    const autoDraft = () => {
+        if (!product)
+            return;
+        const list = draftScenes(product, images.length, tplSel);
+        setScenes(list);
+        setActiveScene(0);
+        setStatus(`「${(TEMPLATES[tplSel] || TEMPLATES.balance).label}」で台本を生成しました(AI未使用)。テロップは商品ページを見ながら必ず手直ししてください。`);
+    };
+    // ---- タイムライン描画 ----
+    const renderAt = useCallback((ctx, w, h, t, withGuides) => {
+        var _a;
+        let acc = 0, idx = 0, p = 0;
+        for (let i = 0; i < scenes.length; i++) {
+            const d = Number(scenes[i].sec) || 0;
+            if (t < acc + d || i === scenes.length - 1) {
+                idx = i;
+                p = d ? Math.min(1, Math.max(0, (t - acc) / d)) : 1;
+                break;
+            }
+            acc += d;
+        }
+        const sc = scenes[idx];
+        if (!sc)
+            return;
+        drawScene(ctx, w, h, sc, (_a = images[sc.img]) === null || _a === void 0 ? void 0 : _a.el, p, product);
+        if (withGuides)
+            drawGuides(ctx, w, h);
+        return idx;
+    }, [scenes, images, product]);
+    // ---- プレビュー再生 ----
+    useEffect(() => {
+        var _a;
+        const cv = previewRef.current;
+        if (!cv)
+            return;
+        const ctx = cv.getContext("2d");
+        if (!scenes.length) {
+            ctx.fillStyle = "#0c0f18";
+            ctx.fillRect(0, 0, cv.width, cv.height);
+            ctx.fillStyle = "#3a4258";
+            ctx.font = `600 18px ${FONT}`;
+            ctx.textAlign = "center";
+            ctx.fillText("台本を生成すると", cv.width / 2, cv.height / 2 - 14);
+            ctx.fillText("プレビューが表示されます", cv.width / 2, cv.height / 2 + 14);
+            return;
+        }
+        if (playing) {
+            playStartRef.current = performance.now();
+            const loop = () => {
+                const t = ((performance.now() - playStartRef.current) / 1000) % Math.max(0.1, totalSec);
+                const idx = renderAt(ctx, cv.width, cv.height, t, guides);
+                if (idx !== undefined)
+                    setActiveScene(idx);
+                rafRef.current = requestAnimationFrame(loop);
+            };
+            rafRef.current = requestAnimationFrame(loop);
+            return () => cancelAnimationFrame(rafRef.current);
+        }
+        else {
+            // 選択シーンの中間フレームを静止表示
+            let acc = 0;
+            for (let i = 0; i < activeScene; i++)
+                acc += Number(scenes[i].sec) || 0;
+            renderAt(ctx, cv.width, cv.height, acc + (Number((_a = scenes[activeScene]) === null || _a === void 0 ? void 0 : _a.sec) || 2) / 2, guides);
+        }
+    }, [playing, scenes, images, guides, activeScene, renderAt, totalSec]);
+    // ---- 書き出し(引数省略時は現在の編集状態を使用) ----
+    const exportVideo = async (scenesList = scenes, imgsList = images, prodObj = product) => {
+        const bad = scenesList.filter((s) => imgsList[s.img] && !imgsList[s.img].exportable);
+        if (bad.length) {
+            setStatus("URL参照の画像が含まれるため書き出せません。該当画像を削除し、保存した画像ファイルを「画像を追加」から入れ直してください。");
+            return false;
+        }
+        if (!scenesList.length)
+            return false;
+        const localTotal = scenesList.reduce((a, s) => a + (Number(s.sec) || 0), 0);
+        const renderLocal = (ctx2, w, h, t) => {
+            var _a;
+            let acc = 0, idx = 0, p = 0;
+            for (let i = 0; i < scenesList.length; i++) {
+                const d = Number(scenesList[i].sec) || 0;
+                if (t < acc + d || i === scenesList.length - 1) {
+                    idx = i;
+                    p = d ? Math.min(1, Math.max(0, (t - acc) / d)) : 1;
+                    break;
+                }
+                acc += d;
+            }
+            const sc = scenesList[idx];
+            if (sc)
+                drawScene(ctx2, w, h, sc, (_a = imgsList[sc.img]) === null || _a === void 0 ? void 0 : _a.el, p, prodObj);
+        };
+        setRecording(true);
+        setExportInfo(null);
+        setProgress(0);
+        const cv = document.createElement("canvas");
+        cv.width = W;
+        cv.height = H;
+        const ctx = cv.getContext("2d");
+        // ---- 音声トラック(合成SE + ビート + BGM)を映像に合流 ----
+        const ac = getAudioCtx();
+        if (ac.state === "suspended")
+            await ac.resume();
+        const dest = ac.createMediaStreamDestination();
+        const master = ac.createGain();
+        master.gain.value = 1;
+        master.connect(dest);
+        const hasAudio = seOn || beatOn || !!bgmBufRef.current;
+        const videoTracks = cv.captureStream(FPS).getVideoTracks();
+        const stream = hasAudio
+            ? new MediaStream([...videoTracks, ...dest.stream.getAudioTracks()])
+            : new MediaStream(videoTracks);
+        const candidates = [
+            "video/mp4;codecs=avc1.640028,mp4a.40.2",
+            "video/mp4",
+            "video/webm;codecs=vp9,opus",
+            "video/webm",
+        ];
+        const mime = candidates.find((m) => window.MediaRecorder && MediaRecorder.isTypeSupported(m));
+        if (!mime) {
+            setStatus("このブラウザは動画録画(MediaRecorder)に対応していません。");
+            setRecording(false);
+            return false;
+        }
+        const ext = mime.startsWith("video/mp4") ? "mp4" : "webm";
+        const chunks = [];
+        const rec = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: 10000000 });
+        rec.ondataavailable = (e) => e.data.size && chunks.push(e.data);
+        const done = new Promise((res) => (rec.onstop = res));
+        rec.start(250);
+        // 音声スケジューリング(録画開始と同期)
+        if (hasAudio) {
+            const t0 = ac.currentTime + 0.08;
+            if (seOn) {
+                let acc = 0;
+                scenesList.forEach((s, i) => {
+                    const t = t0 + acc;
+                    if (s.role === "hook")
+                        scheduleSE(ac, master, t, "impact");
+                    else if (s.role === "price")
+                        scheduleSE(ac, master, t, "ding");
+                    else if (s.role === "cta")
+                        scheduleSE(ac, master, t, "pop");
+                    if (i > 0)
+                        scheduleSE(ac, master, t, "whoosh");
+                    acc += Number(s.sec) || 0;
+                });
+            }
+            if (beatOn)
+                scheduleBeat(ac, master, t0, localTotal);
+            if (bgmBufRef.current) {
+                const src = ac.createBufferSource();
+                src.buffer = bgmBufRef.current;
+                src.loop = true;
+                const bg = ac.createGain();
+                bg.gain.setValueAtTime(0.3, t0);
+                bg.gain.setValueAtTime(0.3, t0 + Math.max(0.1, localTotal - 0.8));
+                bg.gain.linearRampToValueAtTime(0.001, t0 + localTotal); // 末尾フェードアウト
+                src.connect(bg);
+                bg.connect(master);
+                src.start(t0);
+                src.stop(t0 + localTotal);
+            }
+        }
+        const start = performance.now() + 80; // 音声のt0オフセットと同期
+        await new Promise((finish) => {
+            const loop = () => {
+                const t = (performance.now() - start) / 1000;
+                if (t >= localTotal)
+                    return finish();
+                renderLocal(ctx, W, H, t);
+                setProgress(Math.min(100, Math.round((t / localTotal) * 100)));
+                requestAnimationFrame(loop);
+            };
+            requestAnimationFrame(loop);
+        });
+        rec.stop();
+        await done;
+        const blob = new Blob(chunks, { type: mime });
+        setExportInfo({ url: URL.createObjectURL(blob), ext, size: (blob.size / 1048576).toFixed(1) });
+        setProgress(100);
+        setRecording(false);
+        setStatus(ext === "webm"
+            ? "書き出し完了(WebM)。TikTokアプリで読めない場合はMP4に変換してください。"
+            : "書き出し完了(MP4)。そのままTikTokに投稿できます。BGMはTikTok側で追加してください。");
+        return true;
+    };
+    const updateScene = (i, patch) => setScenes((prev) => prev.map((s, j) => (j === i ? { ...s, ...patch } : s)));
+    const moveScene = (i, dir) => setScenes((prev) => {
+        const j = i + dir;
+        if (j < 0 || j >= prev.length)
+            return prev;
+        const next = [...prev];
+        [next[i], next[j]] = [next[j], next[i]];
+        return next;
+    });
+    // ---------- UI ----------
+    const btn = "px-4 py-2 rounded-lg font-bold text-sm transition-colors disabled:opacity-40 disabled:cursor-not-allowed";
+    return (React.createElement("div", { className: "min-h-screen text-sm", style: { background: "#10131C", color: "#EDEFF5", fontFamily: FONT } },
+        React.createElement("div", { className: "max-w-6xl mx-auto p-4 md:p-6" },
+            React.createElement("header", { className: "mb-5" },
+                React.createElement("h1", { className: "text-xl md:text-2xl font-black tracking-wide" },
+                    "TikTok\u52D5\u753B\u30E1\u30FC\u30AB\u30FC ",
+                    React.createElement("span", { style: { color: "#BF0000" } }, "for \u697D\u5929\u5E02\u5834")),
+                React.createElement("p", { className: "mt-1", style: { color: "#8C93A8" } }, "\u5546\u54C1URL\u3092\u5165\u529B \u2192 \u697D\u5929API\u304B\u3089\u81EA\u52D5\u53D6\u5F97 \u2192 AI\u304C\u30DA\u30FC\u30B8\u5185\u5BB9\u306B\u5FE0\u5B9F\u306A\u53F0\u672C\u3092\u751F\u6210 \u2192 9:16\u52D5\u753B\u3092\u66F8\u304D\u51FA\u3057")),
+            React.createElement("div", { className: "flex flex-col lg:flex-row gap-5" },
+                React.createElement("div", { className: "flex flex-col items-center gap-3 shrink-0" },
+                    React.createElement("div", { className: "rounded-2xl p-2", style: { background: "#191E2C", border: "1px solid #2A3145" } },
+                        React.createElement("canvas", { ref: previewRef, width: 304, height: 540, className: "rounded-xl block" })),
+                    React.createElement("div", { className: "flex gap-2 items-center flex-wrap justify-center" },
+                        React.createElement("button", { className: btn, style: { background: playing ? "#2A3145" : "#FFB454", color: playing ? "#EDEFF5" : "#10131C" }, disabled: !scenes.length, onClick: () => setPlaying(!playing) }, playing ? "■ 停止" : "▶ 再生"),
+                        React.createElement("label", { className: "flex items-center gap-1.5 cursor-pointer", style: { color: "#8C93A8" } },
+                            React.createElement("input", { type: "checkbox", checked: guides, onChange: (e) => setGuides(e.target.checked) }),
+                            "TikTok UI\u30AC\u30A4\u30C9"),
+                        React.createElement("span", { className: "font-mono", style: { color: "#8C93A8" } },
+                            totalSec.toFixed(1),
+                            "s / 1080\u00D71920")),
+                    recording && (React.createElement("div", { className: "w-full rounded-full h-2 overflow-hidden", style: { background: "#2A3145" } },
+                        React.createElement("div", { className: "h-2 transition-all", style: { width: `${progress}%`, background: "#FF5D73" } })))),
+                React.createElement("div", { className: "flex-1 min-w-0 flex flex-col gap-4" },
+                    React.createElement("section", { className: "rounded-xl p-4", style: { background: "#191E2C", border: "1px solid #2A3145" } },
+                        React.createElement("h2", { className: "font-black mb-2", style: { color: "#FFB454" } }, "STEP 1\uFF5C\u5546\u54C1URL\u304B\u3089\u81EA\u52D5\u53D6\u5F97"),
+                        React.createElement("details", { className: "mb-2" },
+                            React.createElement("summary", { className: "cursor-pointer font-bold", style: { color: "#8C93A8" } }, "\u2699 \u63A5\u7D9A\u8A2D\u5B9A(\u521D\u56DE\u306E\u307F)"),
+                            React.createElement("div", { className: "flex flex-col gap-1.5 mt-2" },
+                                React.createElement("input", { value: apiBase, onChange: (e) => setApiBase(e.target.value), placeholder: "商品API: 楽天アプリIDを直接入力(GitHub Pages単体はこちら)", className: "w-full rounded px-2 py-1.5 font-mono text-xs", style: { background: "#0F1320", color: "#EDEFF5", border: "1px solid #2A3145" } }),
+                                React.createElement("input", { value: imgProxy, onChange: (e) => setImgProxy(e.target.value), placeholder: "画像プロキシ: https://wsrv.nl/?url=(既定・サーバー不要)", className: "w-full rounded px-2 py-1.5 font-mono text-xs", style: { background: "#0F1320", color: "#EDEFF5", border: "1px solid #2A3145" } }))),
+                        React.createElement("div", { className: "flex gap-2 items-center mb-2" },
+                            React.createElement("input", { value: itemUrl, onChange: (e) => setItemUrl(e.target.value), onKeyDown: (e) => e.key === "Enter" && !fetching && handleFetch(), placeholder: "https://item.rakuten.co.jp/\u5E97\u8217\u30B3\u30FC\u30C9/\u5546\u54C1\u7BA1\u7406\u756A\u53F7/", className: "flex-1 min-w-0 rounded px-2.5 py-2", style: { background: "#0F1320", color: "#EDEFF5", border: "1px solid #2A3145" } }),
+                            React.createElement("button", { className: btn + " shrink-0", style: { background: "#BF0000", color: "#fff" }, disabled: fetching || !itemUrl.trim(), onClick: handleFetch }, fetching ? "取得中…" : "取得")),
+                        React.createElement("div", { className: "flex flex-wrap gap-2 items-center" },
+                            React.createElement("label", { className: btn + " cursor-pointer", style: { background: "#2A3145" } },
+                                "\uD83D\uDCC4 dl-normal-item CSV\u304B\u3089\u9078\u3076",
+                                React.createElement("input", { type: "file", accept: ".csv", className: "hidden", onChange: (e) => e.target.files[0] && handleCsv(e.target.files[0]) })),
+                            React.createElement("label", { className: btn + " cursor-pointer", style: { background: "#2A3145" } },
+                                "\u753B\u50CF\u3092\u8FFD\u52A0",
+                                React.createElement("input", { type: "file", accept: "image/*", multiple: true, className: "hidden", onChange: (e) => e.target.files.length && handleAddImages(e.target.files) })),
+                            product && (React.createElement("span", { className: "truncate max-w-full font-bold", title: product.title },
+                                "\uD83D\uDCE6 ", (_a = product.title) === null || _a === void 0 ? void 0 :
+                                _a.slice(0, 40),
+                                product.price && React.createElement("span", { className: "font-mono ml-2", style: { color: "#FFB454" } },
+                                    "\u00A5",
+                                    Number(product.price).toLocaleString())))),
+                        csvData && (React.createElement("div", { className: "mt-3 rounded-lg p-3", style: { background: "#141926", border: "1px solid #2A3145" } },
+                            React.createElement("div", { className: "flex gap-2 items-center mb-2" },
+                                React.createElement("span", { className: "shrink-0 font-bold", style: { color: "#8C93A8" } }, "\u5E97\u8217URL"),
+                                React.createElement("input", { value: shopCode, onChange: (e) => setShopCode(e.target.value), placeholder: "\u4F8B: beltaworks\uFF08\u753B\u50CF\u306EURL\u751F\u6210\u306B\u4F7F\u7528\u30FB\u4FDD\u5B58\u3055\u308C\u307E\u3059\uFF09", className: "flex-1 min-w-0 rounded px-2.5 py-1.5 font-mono text-xs", style: { background: "#0F1320", color: "#EDEFF5", border: "1px solid #2A3145" } })),
+                            React.createElement("div", { className: "flex gap-2 items-center mb-2 flex-wrap" },
+                                React.createElement("span", { className: "font-black", style: { color: "#FFE14D" } }, "\u26A1 \u4E00\u62EC\u751F\u6210"),
+                                React.createElement("input", { value: manageNo, onChange: (e) => setManageNo(e.target.value), onKeyDown: (e) => e.key === "Enter" && !autoRunning && !recording && autoRun(), placeholder: "\u5546\u54C1\u7BA1\u7406\u756A\u53F7\u3092\u5165\u529B", className: "flex-1 min-w-0 rounded px-2.5 py-1.5 font-mono", style: { background: "#0F1320", color: "#EDEFF5", border: "1px solid #2A3145" } }),
+                                React.createElement("select", { value: tplSel, onChange: (e) => setTplSel(e.target.value), className: "rounded px-2 py-1.5", style: { background: "#2A3145", color: "#EDEFF5" } }, Object.entries(TEMPLATES).map(([k, t]) => React.createElement("option", { key: k, value: k }, t.label))),
+                                React.createElement("button", { className: btn + " shrink-0", style: { background: "#FF5D73", color: "#fff" }, disabled: autoRunning || recording || !manageNo.trim(), onClick: autoRun }, autoRunning ? "生成中…" : "▶ 動画まで自動生成")),
+                            React.createElement("div", { className: "flex gap-2 items-center mb-2" },
+                                React.createElement("input", { value: csvFilter, onChange: (e) => setCsvFilter(e.target.value), placeholder: "\u5546\u54C1\u540D\u30FB\u7BA1\u7406\u756A\u53F7\u3067\u691C\u7D22(\u624B\u52D5\u9078\u629E)", className: "flex-1 min-w-0 rounded px-2.5 py-1.5", style: { background: "#0F1320", color: "#EDEFF5", border: "1px solid #2A3145" } }),
+                                React.createElement("span", { className: "shrink-0 font-mono", style: { color: "#8C93A8" } },
+                                    csvData.rows.length,
+                                    "\u884C")),
+                            React.createElement("div", { className: "max-h-44 overflow-y-auto flex flex-col gap-1" }, csvData.rows
+                                .map((r, i) => ({ r, i }))
+                                .filter(({ r }) => !csvFilter.trim() || r.join(" ").includes(csvFilter.trim()))
+                                .slice(0, 50)
+                                .map(({ r, i }) => {
+                                const nameIdx = csvData.cols.findIndex((c) => c.includes("商品名"));
+                                const label = (nameIdx >= 0 ? r[nameIdx] : r[0]) || "(名称なし)";
+                                return (React.createElement("button", { key: i, onClick: () => selectCsvRow(i), className: "text-left rounded px-2 py-1.5 truncate hover:opacity-80", style: { background: "#0F1320", border: "1px solid #2A3145" }, title: label }, label.slice(0, 48)));
+                            })))),
+                        images.length > 0 && (React.createElement("div", { className: "flex gap-2 mt-3 overflow-x-auto pb-1" }, images.map((im, i) => (React.createElement("div", { key: i, className: "relative shrink-0" },
+                            React.createElement("img", { src: im.src, alt: "", className: "w-14 h-14 object-cover rounded-lg", style: { border: im.exportable ? "2px solid #2A3145" : "2px solid #FF5D73" }, title: im.exportable ? `画像 ${i}` : "URL参照(書き出し不可)" }),
+                            React.createElement("button", { onClick: () => removeImage(i), className: "absolute -top-1.5 -right-1.5 w-5 h-5 rounded-full text-xs font-bold", style: { background: "#FF5D73", color: "#fff" } }, "\u00D7"),
+                            React.createElement("span", { className: "absolute bottom-0 left-0 px-1 rounded text-xs font-mono", style: { background: "rgba(0,0,0,0.7)" } }, i))))))),
+                    React.createElement("section", { className: "rounded-xl p-4", style: { background: "#191E2C", border: "1px solid #2A3145" } },
+                        React.createElement("h2", { className: "font-black mb-2", style: { color: "#FFB454" } }, "STEP 2\uFF5CAI\u306B\u53F0\u672C\u3092\u4F5C\u3089\u305B\u308B"),
+                        React.createElement("p", { className: "mb-2", style: { color: "#8C93A8" } },
+                            "\u5546\u54C1\u8AAC\u660E\u306B\u66F8\u304B\u308C\u305F\u60C5\u5831\u3060\u3051\u3067\u69CB\u6210\u3057\u307E\u3059(\u7528\u9014\u30FB\u9069\u5408\u306E\u5275\u4F5C\u306F\u7981\u6B62\u6E08\u307F)\u3002TikTok\u3067\u300C\u8ECA\u7528\u54C1\u300D\u3084\u540C\u4E00\u5546\u54C1\u3092\u691C\u7D22\u3057\u3001\u826F\u3044\u3068\u601D\u3063\u305F\u6295\u7A3F\u306E\u7279\u5FB4\u3092\u4E0B\u306B\u8CBC\u308B\u3068\u3001\u305D\u306E",
+                            React.createElement("b", null, "\u69CB\u6210\u306E\u578B"),
+                            "\u3092\u6A21\u5023\u3057\u307E\u3059(\u6587\u8A00\u30FB\u6620\u50CF\u30FB\u97F3\u58F0\u306E\u30B3\u30D4\u30FC\u306F\u3057\u307E\u305B\u3093)\u3002"),
+                        React.createElement("textarea", { value: refStyle, onChange: (e) => setRefStyle(e.target.value), rows: 4, placeholder: "参考にする投稿の特徴(5件まで・任意)\n例:\n@アカウントA: 冒頭0.5秒でドン寄り+「知らないと損」系フック\n@アカウントB: 1秒刻みのクイックカット、価格は最後に大きく\n@アカウントC: 装着シーンをテンポよく、テロップは黄色1行", className: "w-full rounded px-2.5 py-2 mb-2 resize-y", style: { background: "#0F1320", color: "#EDEFF5", border: "1px solid #2A3145" } }),
+                        React.createElement("div", { className: "flex flex-wrap gap-2 items-center mb-3" },
+                            React.createElement("button", { className: btn, style: { background: "#FFB454", color: "#10131C" }, disabled: !product || !images.length, onClick: copyPrompt }, "\uD83D\uDCCB \u53F0\u672C\u30D7\u30ED\u30F3\u30D7\u30C8\u3092\u30B3\u30D4\u30FC"),
+                            React.createElement("select", { value: tplSel, onChange: (e) => setTplSel(e.target.value), className: "rounded px-2 py-2 font-bold", style: { background: "#2A3145", color: "#EDEFF5" } }, Object.entries(TEMPLATES).map(([k, t]) => React.createElement("option", { key: k, value: k }, t.label))),
+                            React.createElement("button", { className: btn, style: { background: "#2A3145" }, disabled: !product || !images.length, onClick: autoDraft }, "\u26A1 \u30C6\u30F3\u30D7\u30EC\u3067\u81EA\u52D5\u751F\u6210(AI\u306A\u3057)"),
+                            React.createElement("label", { className: "flex items-center gap-1.5 cursor-pointer", style: { color: "#8C93A8" } },
+                                React.createElement("input", { type: "checkbox", checked: autoTrend, onChange: (e) => setAutoTrend(e.target.checked) }),
+                                "\u30C8\u30EC\u30F3\u30C9\u8ABF\u67FB\u306E\u6307\u793A\u3092\u542B\u3081\u308B")),
+                        React.createElement("p", { className: "mb-1.5", style: { color: "#8C93A8" } },
+                            "\u30B3\u30D4\u30FC\u3057\u305F\u30D7\u30ED\u30F3\u30D7\u30C8\u3092 ",
+                            React.createElement("b", null, "claude.ai"),
+                            "(\u5B9A\u984D\u30D7\u30E9\u30F3)\u306E\u65B0\u898F\u30C1\u30E3\u30C3\u30C8\u306B\u8CBC\u308A\u3001\u8FD4\u3063\u3066\u304D\u305FJSON\u3092\u4E0B\u306B\u8CBC\u308A\u4ED8\u3051:"),
+                        React.createElement("div", { className: "flex gap-2 items-start" },
+                            React.createElement("textarea", { value: aiReply, onChange: (e) => setAiReply(e.target.value), rows: 3, placeholder: 'claude.ai\u306E\u8FD4\u7B54\u3092\u8CBC\u308A\u4ED8\u3051({"scenes": [...] })', className: "flex-1 min-w-0 rounded px-2.5 py-2 resize-y font-mono text-xs", style: { background: "#0F1320", color: "#EDEFF5", border: "1px solid #2A3145" } }),
+                            React.createElement("button", { className: btn + " shrink-0", style: { background: "#FFB454", color: "#10131C" }, disabled: !aiReply.trim(), onClick: importReply }, "\u53D6\u308A\u8FBC\u3080"))),
+                    scenes.length > 0 && (React.createElement("section", { className: "rounded-xl p-4", style: { background: "#191E2C", border: "1px solid #2A3145" } },
+                        React.createElement("h2", { className: "font-black mb-3", style: { color: "#FFB454" } }, "STEP 3\uFF5C\u30B7\u30FC\u30F3\u3092\u78BA\u8A8D\u30FB\u4FEE\u6B63"),
+                        React.createElement("div", { className: "flex flex-col gap-2" }, scenes.map((s, i) => (React.createElement("div", { key: i, onClick: () => { setActiveScene(i); setPlaying(false); }, className: "rounded-lg p-3 cursor-pointer", style: {
+                                background: activeScene === i ? "#232B40" : "#141926",
+                                border: activeScene === i ? "1px solid #FFB454" : "1px solid #2A3145",
+                            } },
+                            React.createElement("div", { className: "flex flex-wrap gap-2 items-center mb-2" },
+                                React.createElement("span", { className: "font-mono font-bold", style: { color: "#8C93A8" } },
+                                    "#",
+                                    i + 1),
+                                React.createElement("select", { value: s.role, onChange: (e) => updateScene(i, { role: e.target.value }), className: "rounded px-2 py-1 font-bold", style: { background: "#2A3145", color: "#EDEFF5" } }, ROLES.map((r) => React.createElement("option", { key: r, value: r }, ROLE_LABEL[r]))),
+                                React.createElement("select", { value: s.img, onChange: (e) => updateScene(i, { img: Number(e.target.value) }), className: "rounded px-2 py-1", style: { background: "#2A3145", color: "#EDEFF5" } }, images.map((_, j) => React.createElement("option", { key: j, value: j },
+                                    "\u753B\u50CF",
+                                    j))),
+                                React.createElement("select", { value: s.effect, onChange: (e) => updateScene(i, { effect: e.target.value }), className: "rounded px-2 py-1", style: { background: "#2A3145", color: "#EDEFF5" } }, EFFECTS.map((ef) => React.createElement("option", { key: ef, value: ef }, EFFECT_LABEL[ef]))),
+                                React.createElement("input", { type: "number", step: "0.1", min: "1", max: "5", value: s.sec, onChange: (e) => updateScene(i, { sec: Number(e.target.value) }), className: "w-16 rounded px-2 py-1 font-mono", style: { background: "#2A3145", color: "#EDEFF5" } }),
+                                React.createElement("span", { style: { color: "#8C93A8" } }, "\u79D2"),
+                                React.createElement("div", { className: "ml-auto flex gap-1" },
+                                    React.createElement("button", { onClick: (e) => { e.stopPropagation(); moveScene(i, -1); }, className: "px-2 rounded", style: { background: "#2A3145" } }, "\u2191"),
+                                    React.createElement("button", { onClick: (e) => { e.stopPropagation(); moveScene(i, 1); }, className: "px-2 rounded", style: { background: "#2A3145" } }, "\u2193"),
+                                    React.createElement("button", { onClick: (e) => { e.stopPropagation(); setScenes(scenes.filter((_, j) => j !== i)); }, className: "px-2 rounded", style: { background: "#3A2430", color: "#FF5D73" } }, "\u524A\u9664"))),
+                            React.createElement("textarea", { value: s.text, onChange: (e) => updateScene(i, { text: e.target.value }), rows: 2, placeholder: "\u30C6\u30ED\u30C3\u30D7(\\n\u6539\u884C\u3067\u6700\u59272\u884C)", className: "w-full rounded px-2 py-1.5 resize-none font-bold", style: { background: "#0F1320", color: "#EDEFF5", border: "1px solid #2A3145" } }),
+                            React.createElement("input", { value: s.sub, onChange: (e) => updateScene(i, { sub: e.target.value }), placeholder: "\u30B5\u30D6\u30C6\u30ED\u30C3\u30D7(\u4EFB\u610F)", className: "w-full mt-1.5 rounded px-2 py-1", style: { background: "#0F1320", color: "#8FE3FF", border: "1px solid #2A3145" } }))))))),
+                    scenes.length > 0 && (React.createElement("section", { className: "rounded-xl p-4", style: { background: "#191E2C", border: "1px solid #2A3145" } },
+                        React.createElement("h2", { className: "font-black mb-2", style: { color: "#FFB454" } }, "STEP 4\uFF5C\u97F3\u58F0\u3068\u66F8\u304D\u51FA\u3057"),
+                        React.createElement("div", { className: "flex flex-wrap gap-3 items-center mb-3 rounded-lg px-3 py-2", style: { background: "#141926", border: "1px solid #2A3145" } },
+                            React.createElement("span", { className: "font-bold", style: { color: "#8FE3FF" } }, "\uD83D\uDD0A \u97F3\u58F0"),
+                            React.createElement("label", { className: "flex items-center gap-1.5 cursor-pointer" },
+                                React.createElement("input", { type: "checkbox", checked: seOn, onChange: (e) => setSeOn(e.target.checked) }),
+                                "\u52B9\u679C\u97F3(\u30C9\u30F3\u30FB\u30B9\u30A6\u30C3\u30B7\u30E5\u30FB\u30C1\u30E3\u30EA\u30F3)"),
+                            React.createElement("label", { className: "flex items-center gap-1.5 cursor-pointer" },
+                                React.createElement("input", { type: "checkbox", checked: beatOn, onChange: (e) => setBeatOn(e.target.checked) }),
+                                "\u30D3\u30FC\u30C8(104BPM)"),
+                            React.createElement("label", { className: btn + " cursor-pointer", style: { background: "#2A3145" } },
+                                bgmName ? `♪ ${bgmName.slice(0, 18)}` : "BGMファイルを追加",
+                                React.createElement("input", { type: "file", accept: "audio/*", className: "hidden", onChange: (e) => e.target.files[0] && handleBgm(e.target.files[0]) }))),
+                        React.createElement("div", { className: "flex flex-wrap gap-2 items-center" },
+                            React.createElement("button", { className: btn, style: { background: "#FF5D73", color: "#fff" }, disabled: recording, onClick: () => exportVideo() }, recording ? `録画中… ${progress}%` : "⏺ 動画を書き出す"),
+                            exportInfo && (React.createElement("a", { href: exportInfo.url, download: `tiktok_${((product === null || product === void 0 ? void 0 : product.title) || "video").replace(/\s+/g, "_").slice(0, 30)}.${exportInfo.ext}`, className: btn, style: { background: "#2ECC8F", color: "#10131C" } },
+                                "\u2B07 \u30C0\u30A6\u30F3\u30ED\u30FC\u30C9 (",
+                                exportInfo.ext.toUpperCase(),
+                                " / ",
+                                exportInfo.size,
+                                "MB)"))),
+                        React.createElement("p", { className: "mt-2", style: { color: "#8C93A8" } },
+                            "\u66F8\u304D\u51FA\u3057\u4E2D\u306F\u30BF\u30D6\u3092\u524D\u9762\u306B\u8868\u793A\u3057\u305F\u307E\u307E\u306B\u3057\u3066\u304F\u3060\u3055\u3044\u3002\u52B9\u679C\u97F3\u30FB\u30D3\u30FC\u30C8\u306F\u8457\u4F5C\u6A29\u30D5\u30EA\u30FC\u306E\u5408\u6210\u97F3\u3067\u3059\u3002\u6D41\u884C\u306E\u97F3\u6E90\u3092\u4F7F\u3044\u305F\u3044\u5834\u5408\u306F\u3053\u3053\u3067\u306F\u4ED8\u3051\u305A\u3001TikTok\u6295\u7A3F\u6642\u306B",
+                            React.createElement("b", null, "\u5546\u7528\u697D\u66F2\u30E9\u30A4\u30D6\u30E9\u30EA(CML)"),
+                            "\u304B\u3089\u8FFD\u52A0\u3057\u3066\u304F\u3060\u3055\u3044(\u30D3\u30B8\u30CD\u30B9\u30A2\u30AB\u30A6\u30F3\u30C8\u306FCML\u5916\u306E\u697D\u66F2\u304C\u4F7F\u3048\u305A\u3001\u713C\u304D\u8FBC\u3080\u3068\u30DF\u30E5\u30FC\u30C8\u3055\u308C\u307E\u3059\u3002\u30A2\u30D7\u30EA\u5185\u97F3\u6E90\u306E\u65B9\u304C\u304A\u3059\u3059\u3081\u306B\u3082\u4E57\u308A\u3084\u3059\u3044)\u3002BGM\u30D5\u30A1\u30A4\u30EB\u306F\u5546\u7528\u5229\u7528\u53EF\u80FD\u306A\u97F3\u6E90\u306E\u307F\u3002"))),
+                    status && (React.createElement("div", { className: "rounded-lg px-3 py-2", style: { background: "#232B40", border: "1px solid #2A3145", color: "#EDEFF5" } }, status)))))));
+}
+ReactDOM.createRoot(document.getElementById("root")).render(React.createElement(RakutenTikTokMaker));
+
+</script>
+  </body>
+</html>
