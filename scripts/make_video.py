@@ -49,26 +49,11 @@ def fit_font(d, txt, size, max_w=SAFE_W):
 
 def fetch_item(url):
     html = requests.get(url, headers=UA, timeout=30).text
-    imgs = re.findall(r"https://image\.rakuten\.co\.jp/[^\s\"'<>\\)]+?\.(?:jpe?g|png)", html)
-    seen, urls = set(), []
-    for u in imgs:
-        u = re.sub(r"\?.*$", "", u)
-        if re.search(r"banner|logo|header|footer|common", u, re.I):
-            continue
-        if u not in seen:
-            seen.add(u); urls.append(u)
-    m = re.search(r'<meta property="og:image" content="(https://image\.rakuten\.co\.jp/[^"]+)"', html)
-    if m:
-        og = re.sub(r"\?.*$", "", m.group(1))
-        folder = og.rsplit("/", 1)[0] + "/"
-        same = [u for u in urls if u.startswith(folder)]
-        if og not in same and og.endswith((".jpg", ".jpeg", ".png")):
-            same.insert(0, og)
-        if len(same) >= 2:
-            urls = same
+    # タイトル
     m = re.search(r'<meta property="og:title" content="([^"]+)"', html)
     title = m.group(1) if m else ""
-    title = re.sub(r"【[^】]*】", "", title).split("|")[0].strip()
+    title = re.sub(r"【[^】]*】", "", title).replace("楽天市場", "").split("|")[0].split(":")[0].strip()
+    # 価格
     price = None
     for pat in [r'"@type"\s*:\s*"Offer"[\s\S]{0,300}?"price"\s*:\s*"?(\d{3,7})',
                 r'"price"\s*:\s*"?(\d{3,7})',
@@ -77,6 +62,36 @@ def fetch_item(url):
         m = re.search(pat, html)
         if m:
             price = int(m.group(1).replace(",", "")); break
+    # === 商品ギャラリー画像の特定 ===
+    m = re.search(r'<meta property="og:image" content="(https://[^"]+)"', html)
+    og = re.sub(r"\?.*$", "", m.group(1)) if m else None
+    urls = []
+    # 方式1: メイン画像の連番(_00,_01,...)を辿る = ギャラリーのみを正確取得
+    if og:
+        m2 = re.match(r"(.+_)(\d{2})(\.(?:jpe?g|png))$", og)
+        if m2:
+            base, _, ext = m2.groups()
+            for i in range(0, 16):
+                cand = f"{base}{i:02d}{ext}"
+                try:
+                    h = requests.head(cand, headers=UA, timeout=10)
+                    if h.status_code == 200:
+                        urls.append(cand)
+                except Exception:
+                    pass
+                if len(urls) >= MAX_IMGS + 2:
+                    break
+    # 方式2(予備): メイン画像と同じフォルダの画像のみ許可(ヘッダー/バナー排除)
+    if len(urls) < 2 and og:
+        folder = og.rsplit("/", 1)[0] + "/"
+        found = re.findall(r"https://(?:shop\.r10s\.jp|image\.rakuten\.co\.jp|thumbnail\.image\.rakuten\.co\.jp)/[^\s\"'<>\\)]+?\.(?:jpe?g|png)", html)
+        seen = set(urls)
+        for u in found:
+            u = re.sub(r"\?.*$", "", u)
+            if u.startswith(folder) and u not in seen:
+                seen.add(u); urls.append(u)
+        if og not in urls:
+            urls.insert(0, og)
     return urls, title, price
 
 def car_name(title):
@@ -156,7 +171,7 @@ def render_cut(idx, bg, fg, overlays, sec, drift):
     seg = f"work/seg{idx:02d}.mp4"
     subprocess.run(["ffmpeg", "-y", "-v", "error", *inputs, "-filter_complex", fc,
                     "-map", "[v]", "-t", str(sec), "-r", str(FPS),
-                    "-c:v", "libx264", "-preset", "medium", seg], check=True)
+                    "-c:v", "libx264", "-preset", "medium", "-crf", "17", seg], check=True)
     return seg, sec
 
 def build_video(imgs, title, price, outp):
@@ -187,7 +202,7 @@ def build_video(imgs, title, price, outp):
         last = f"x{i}"
     fc += f"[{last}]format=yuv420p[v]"
     subprocess.run(["ffmpeg", "-y", "-v", "error", *inputs, "-filter_complex", fc,
-                    "-map", "[v]", "-r", str(FPS), "-c:v", "libx264", "-preset", "medium",
+                    "-map", "[v]", "-r", str(FPS), "-c:v", "libx264", "-preset", "medium", "-crf", "17",
                     "-movflags", "+faststart", outp], check=True)
 
 # ============ 内蔵審査エージェント ============
